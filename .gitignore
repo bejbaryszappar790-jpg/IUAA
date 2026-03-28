@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/          # ДОБАВИЛИ ЭТО (твоя папка)
+venv/           # На всякий случай
+env/
+.env
+
+# ИИ модели (веса весят много, их не пушим)
+*.pth
+*.bin
+*.pkl
+
+# macOS
+.DS_Store
+
+# Flutter/Dart
+.dart_tool/
+.packages
+.pub-cache/
+build/
