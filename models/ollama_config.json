@@ -1,0 +1,6 @@
+{
+  "model": "deepseek-r1:7b",
+  "temperature": 0,
+  "top_p": 1,
+  "top_k": 1
+}
