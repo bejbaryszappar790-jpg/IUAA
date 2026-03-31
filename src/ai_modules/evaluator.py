@@ -19,9 +19,8 @@ def evaluate_candidate(text):
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0,
-                    "top_p": 1,
-                    "top_k": 1
+                    "temperature": 0.3,
+                    "top_p": 0.9
                 }
             }
         )
