@@ -1,76 +1,76 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel
-from typing import List, Optional
+import sys
 import os
 import shutil
+import uuid
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
-# Импортируем твою логику из соседнего модуля
-# Важно: запускать uvicorn нужно из корня или папки src
-from src.ai_modules.evaluator import evaluate_candidate
+# 1. Настройка путей (чтобы API видел твои модули)
+root_path = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root_path))
+
+# 2. Импорт твоих модулей и логики Харуна
 from src.ai_modules.file_reader import read_file
+from src.ai_modules.evaluator import evaluate_candidate
 
-app = FastAPI(
-    title="IUAA API",
-    description="Интеллектуальный ассистент приемной комиссии InVision U",
-    version="1.0.0"
-)
+app = FastAPI(title="InVision U - Trust Engine API")
 
-# Модель для текстового ввода (например, из формы эссе)
-class EssaySubmission(BaseModel):
-    candidate_name: str
-    essay_text: str
-
-# Модель ответа (теперь более детальная)
-class AnalysisResult(BaseModel):
-    candidate_name: str
-    raw_analysis: str  # Полный текст от DeepSeek с баллами
+# Создаем папку для временных файлов, если её нет
+TEMP_DIR = "temp_storage"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.get("/")
-async def root():
-    return {"status": "online", "project": "IUAA", "case": "Invision U"}
+async def health_check():
+    return {"status": "online", "message": "IUAA Backend is running"}
 
-@app.post("/analyze-text", response_model=AnalysisResult)
-async def analyze_text(submission: EssaySubmission):
-    """Эндпоинт для прямого анализа текста эссе"""
-    if not submission.essay_text:
-        raise HTTPException(status_code=400, detail="Текст эссе пуст")
-    
-    try:
-        # Вызываем реальную функцию из evaluator.py
-        analysis = evaluate_candidate(submission.essay_text)
-        return AnalysisResult(
-            candidate_name=submission.candidate_name,
-            raw_analysis=analysis
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка ИИ: {str(e)}")
+@app.post("/analyze")
+async def analyze_candidate(
+    candidate_name: str = Form(...),
+    test_date: str = Form(...),  # Ожидаем ГГГГ-ММ-ДД
+    cert_type: str = Form(...),  # Например: IELTS, TOEFL, UNT
+    file: UploadFile = File(...)
+):
+    # А. Сохраняем файл временно для обработки
+    file_id = str(uuid.uuid4())
+    ext = os.path.splitext(file.filename)[1]
+    temp_file_path = os.path.join(TEMP_DIR, f"{file_id}{ext}")
 
-@app.post("/analyze-file")
-async def analyze_upload(candidate_name: str, file: UploadFile = File(...)):
-    """Эндпоинт для загрузки PDF/DOCX файлов"""
-    # Создаем временную папку для сохранения файла
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, file.filename)
-    
     try:
-        with open(file_path, "wb") as buffer:
+        # Сохраняем загруженный файл на диск
+        with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # 1. Читаем файл через твой file_reader.py
-        text = read_file(file_path)
-        
-        # 2. Оцениваем текст через твой evaluator.py
-        analysis = evaluate_candidate(text)
-        
+
+        # Б. Извлекаем текст (через твой file_reader.py)
+        try:
+            extracted_text = read_file(temp_file_path)
+        except Exception:
+            # Если это картинка-сертификат без текста, просто ставим заглушку
+            extracted_text = "Текст не извлечен (анализ изображения сертификата)"
+
+        # В. ЗАПУСК ИИ (Вызов функции Харуна)
+        # Мы передаем путь к файлу, чтобы cert_val.py мог найти QR-код
+        analysis_report = evaluate_candidate(
+            text=extracted_text,
+            cert_file=temp_file_path,
+            test_date=test_date,
+            cert_type=cert_type
+        )
+
         return {
-            "candidate_name": candidate_name,
-            "filename": file.filename,
-            "analysis": analysis
+            "candidate": candidate_name,
+            "technical_status": "Processed",
+            "ai_report": analysis_report
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки файла: {str(e)}")
+        # Если что-то пошло не так (например, Ollama не отвечает)
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
+    
     finally:
-        # Удаляем временный файл
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # Г. Очистка: удаляем временный файл после обработки
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
