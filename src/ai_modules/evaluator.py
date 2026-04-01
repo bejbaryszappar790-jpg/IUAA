@@ -15,7 +15,7 @@ def evaluate_candidate(text):
         response = requests.post(
             OLLAMA_URL,
             json={
-                "model": "deepseek-r1:8b",
+                "model": "MFDoom/deepseek-r1-tool-calling:8b",
                 "prompt": prompt,
                 "stream": False,
                 "options": {
