@@ -60,3 +60,18 @@ def check_expiry(test_date_str, certificate_type="IELTS", date_format="%Y-%m-%d"
         "expiry_date": expiry_date,
         "days_left": days_left
     }
+
+def verify_certificate(file_path, test_date, cert_type):
+    qr_url = extract_qr_link(file_path)
+
+    link_valid, link_msg = verify_certificate_link(qr_url)
+
+    expiry = check_expiry(test_date, cert_type)
+
+    return {
+        "qr_url": qr_url,
+        "qr_found": qr_url is not None,
+        "link_valid": link_valid,
+        "link_message": link_msg,
+        "expiry": expiry
+    }
