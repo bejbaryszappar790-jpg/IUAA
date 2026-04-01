@@ -1,6 +1,6 @@
 import requests
-from .prompts import SYSTEM_PROMPT
-from .cert_val import verify_certificate
+from src.ai_modules.prompts import SYSTEM_PROMPT
+from src.ai_modules.cert_val import verify_certificate
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 

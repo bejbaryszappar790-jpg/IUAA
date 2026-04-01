@@ -15,9 +15,11 @@ def read_pdf(file_path):
     return text
 
 def read_file(file_path):
-    if file_path.endswith(".docx"):
+    ext = file_path.lower()
+    if ext.endswith(".docx"):
         return read_docx(file_path)
-    elif file_path.endswith(".pdf"):
+    elif ext.endswith(".pdf"):
         return read_pdf(file_path)
-    else:
-        raise ValueError("Unsupported format")
+    elif ext.endswith((".jpg", ".jpeg", ".png")):
+        return "Image file detected. Skipping text extraction, proceeding to QR validation."
+    else: raise ValueError("Unsupported format")

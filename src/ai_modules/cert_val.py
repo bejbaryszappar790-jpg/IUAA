@@ -19,6 +19,9 @@ def extract_qr_link(image_path):
     return detected_objects[0].data.decode("utf-8")
 
 def verify_certificate_link(url, allowed_domains=None):
+    if not url:
+        return False, "QR link not found"
+    
     try:
         response = requests.get(url, timeout=10)
 
