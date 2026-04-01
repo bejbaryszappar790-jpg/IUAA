@@ -1,5 +1,5 @@
 {
-  "model": "deepseek-r1:8b",
+  "model": "MFDoom/deepseek-r1-tool-calling:8b",
   "temperature": 0.3,
   "top_p": 0.9
 }
