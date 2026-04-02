@@ -5,7 +5,10 @@ import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
 import { ShieldCheck, User, Search, Brain, Activity, FileUp } from "lucide-react";
 
-// Твои компоненты
+/** * РЕШЕНИЕ ПРОБЛЕМЫ ПУТЕЙ:
+ * Мы используем '@/src/ui/...', если у тебя настроен baseUrl в tsconfig.json,
+ * но самый надежный способ сейчас — это относительный путь '../src/ui/'.
+ */
 import { Card } from "../src/ui/Card";
 import { Input } from "../src/ui/Input";
 import { Button } from "../src/ui/Button";
@@ -18,23 +21,23 @@ export default function Home() {
 
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) return alert("Бейбарыс, файлды жүктеуді ұмытпа!");
+    if (!file) return alert("Бейбарыс, файлды жүктеуді забыл!");
 
     setLoading(true);
     const data = new FormData();
     data.append("candidate_name", name);
-    // Бэкендтегі analyze_candidate функциясы талап ететін қосымша өрістер
+    // Эти поля важны для твоего FastAPI бэкенда (main.py)
     data.append("test_date", "2026-04-02"); 
     data.append("cert_type", "IELTS/General");
     data.append("file", file);
 
     try {
-      // МАҢЫЗДЫ: Харунның IP мекенжайына сұраныс жіберу
+      // Запрос идет на ноутбук Харуна
       const res = await axios.post("http://10.60.98.150:8000/analyze", data);
       setResult(res.data);
-    } catch (err) {
-      console.error(err);
-      alert("Қате: Харунның бэкенд серверіне қосылу мүмкін болмады. IP дұрыс па және бэкенд қосулы ма?");
+    } catch (err: any) {
+      console.error("Ошибка связи:", err);
+      alert(`Ошибка: ${err.message}. Проверь, запущен ли бэкенд у Харуна по адресу 10.60.98.150:8000`);
     } finally {
       setLoading(false);
     }
@@ -42,6 +45,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#030406] text-slate-300 p-6 md:p-12 selection:bg-blue-500/30">
+      {/* Фоновое свечение */}
       <div className="fixed top-0 right-0 w-[60%] h-[60%] bg-blue-600/5 blur-[140px] rounded-full -z-10" />
 
       <div className="max-w-6xl mx-auto">
@@ -56,6 +60,7 @@ export default function Home() {
         </header>
 
         <div className="grid lg:grid-cols-2 gap-12 items-start">
+          {/* ЛЕВАЯ ПАНЕЛЬ: ВВОД */}
           <motion.div initial={{ x: -30, opacity: 0 }} animate={{ x: 0, opacity: 1 }}>
             <Card title="Параметры объекта" icon={Search}>
               <form onSubmit={handleStartAnalysis} className="space-y-8">
@@ -78,6 +83,7 @@ export default function Home() {
             </Card>
           </motion.div>
 
+          {/* ПРАВАЯ ПАНЕЛЬ: РЕЗУЛЬТАТЫ */}
           <motion.div initial={{ x: 30, opacity: 0 }} animate={{ x: 0, opacity: 1 }}>
             <AnimatePresence mode="wait">
               {result ? (
