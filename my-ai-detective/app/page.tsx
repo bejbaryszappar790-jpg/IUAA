@@ -5,7 +5,7 @@ import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
 import { ShieldCheck, User, Search, Brain, Activity, FileUp } from "lucide-react";
 
-// Твои новые компоненты
+// Твои компоненты
 import { Card } from "../src/ui/Card";
 import { Input } from "../src/ui/Input";
 import { Button } from "../src/ui/Button";
@@ -18,19 +18,23 @@ export default function Home() {
 
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) return alert("Бейбарыс, прикрепи файл!");
+    if (!file) return alert("Бейбарыс, файлды жүктеуді ұмытпа!");
 
     setLoading(true);
     const data = new FormData();
     data.append("candidate_name", name);
+    // Бэкендтегі analyze_candidate функциясы талап ететін қосымша өрістер
+    data.append("test_date", "2026-04-02"); 
+    data.append("cert_type", "IELTS/General");
     data.append("file", file);
 
     try {
-      // Запрос к твоему FastAPI бэкенду
-      const res = await axios.post("http://127.0.0.1:8000/analyze", data);
+      // МАҢЫЗДЫ: Харунның IP мекенжайына сұраныс жіберу
+      const res = await axios.post("http://10.60.98.150:8000/analyze", data);
       setResult(res.data);
     } catch (err) {
-      alert("Ошибка: Бэкенд не запущен или CORS заблокирован.");
+      console.error(err);
+      alert("Қате: Харунның бэкенд серверіне қосылу мүмкін болмады. IP дұрыс па және бэкенд қосулы ма?");
     } finally {
       setLoading(false);
     }
@@ -38,7 +42,6 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#030406] text-slate-300 p-6 md:p-12 selection:bg-blue-500/30">
-      {/* Эффект свечения на фоне */}
       <div className="fixed top-0 right-0 w-[60%] h-[60%] bg-blue-600/5 blur-[140px] rounded-full -z-10" />
 
       <div className="max-w-6xl mx-auto">
@@ -53,7 +56,6 @@ export default function Home() {
         </header>
 
         <div className="grid lg:grid-cols-2 gap-12 items-start">
-          {/* СЕКЦИЯ ВВОДА */}
           <motion.div initial={{ x: -30, opacity: 0 }} animate={{ x: 0, opacity: 1 }}>
             <Card title="Параметры объекта" icon={Search}>
               <form onSubmit={handleStartAnalysis} className="space-y-8">
@@ -65,7 +67,7 @@ export default function Home() {
                   </label>
                   <div className="relative group border-2 border-dashed border-slate-800 rounded-3xl p-10 text-center hover:border-blue-500/40 transition-all bg-slate-950/20">
                     <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
-                    <p className="text-sm font-bold text-slate-400 group-hover:text-blue-400">
+                    <p className="text-sm font-bold text-slate-400 group-hover:text-blue-400 transition-colors">
                       {file ? file.name : "ПЕРЕТАЩИТЕ ФАЙЛ СЮДА"}
                     </p>
                   </div>
@@ -76,19 +78,18 @@ export default function Home() {
             </Card>
           </motion.div>
 
-          {/* СЕКЦИЯ РЕЗУЛЬТАТОВ */}
           <motion.div initial={{ x: 30, opacity: 0 }} animate={{ x: 0, opacity: 1 }}>
             <AnimatePresence mode="wait">
               {result ? (
                 <Card title="Результат сканирования" icon={Brain}>
                   <div className="space-y-8">
-                    <div className="bg-blue-600/5 border-l-2 border-blue-600 p-6 rounded-r-2xl italic text-sm leading-relaxed text-blue-100/80">
+                    <div className="bg-blue-600/5 border-l-2 border-blue-600 p-6 rounded-r-2xl italic text-sm leading-relaxed text-blue-100/80 shadow-inner">
                       "{result.ai_report}"
                     </div>
 
                     <div className="grid grid-cols-3 gap-4">
                       {Object.entries(result.ai_extracted_scores || {}).map(([key, val]: any) => (
-                        <div key={key} className="bg-slate-900/60 border border-slate-800 p-5 rounded-3xl text-center">
+                        <div key={key} className="bg-slate-900/60 border border-slate-800 p-5 rounded-3xl text-center hover:border-blue-500/30 transition-all">
                           <p className="text-[9px] text-slate-500 font-black uppercase tracking-tighter mb-1">{key}</p>
                           <p className="text-3xl font-black text-white">{val}<span className="text-xs text-slate-600">/10</span></p>
                         </div>
