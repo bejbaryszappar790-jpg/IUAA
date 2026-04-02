@@ -121,12 +121,14 @@ async def score_candidate(profile: CandidateFullProfile):
     try:
         # Шаг 1: LLM анализ эссе → получаем текст + баллы
         ai_report, ai_scores = evaluate_candidate(
-            text=profile.essay_text,
+            candidate_text=profile.essay_text,
             test_date=profile.test_date,
             cert_type=profile.cert_type
         )
  
-        leadership   = ai_scores.get("leadership", 5)
+        # ИСХОДНЫЕ ДАННЫЕ ДЛЯ СКОРИНГА (Берем новые ключи из evaluator.py)
+        experience   = ai_scores.get("experience", 5)
+        potential    = ai_scores.get("potential", 5)
         growth       = ai_scores.get("growth", 5)
         authenticity = ai_scores.get("authenticity", 5)
  
@@ -145,7 +147,7 @@ async def score_candidate(profile: CandidateFullProfile):
             for a in (profile.achievements or [])
         ]
         achievement_result = score_achievements(achievement_list)
-        essay_result = score_essay(leadership, growth, authenticity)
+        essay_result = score_essay(experience, growth, authenticity, potential)
  
         # Шаг 3: Итоговый балл
         total = compute_total_score(
