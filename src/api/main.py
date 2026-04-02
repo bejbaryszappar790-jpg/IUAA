@@ -93,9 +93,9 @@ async def analyze_candidate(
         except Exception:
             extracted_text = "Текст не извлечён (изображение сертификата)"
  
-        # evaluate_candidate возвращает (report_text, scores_dict)
+        # ИСПРАВЛЕНО: Аргумент теперь называется candidate_text, как в evaluator.py
         report, scores = evaluate_candidate(
-            text=extracted_text,
+            candidate_text=extracted_text, 
             cert_file=temp_path,
             test_date=test_date,
             cert_type=cert_type
@@ -109,6 +109,8 @@ async def analyze_candidate(
         }
  
     except Exception as e:
+        # Печатаем ошибку в консоль бэкенда для отладки
+        print(f"Ошибка в /analyze: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
@@ -119,14 +121,14 @@ async def analyze_candidate(
 @app.post("/score")
 async def score_candidate(profile: CandidateFullProfile):
     try:
-        # Шаг 1: LLM анализ эссе → получаем текст + баллы
+        # Шаг 1: LLM анализ эссе
         ai_report, ai_scores = evaluate_candidate(
             candidate_text=profile.essay_text,
             test_date=profile.test_date,
             cert_type=profile.cert_type
         )
  
-        # ИСХОДНЫЕ ДАННЫЕ ДЛЯ СКОРИНГА (Берем новые ключи из evaluator.py)
+        # Извлекаем баллы (теперь их 4)
         experience   = ai_scores.get("experience", 5)
         potential    = ai_scores.get("potential", 5)
         growth       = ai_scores.get("growth", 5)
@@ -147,6 +149,8 @@ async def score_candidate(profile: CandidateFullProfile):
             for a in (profile.achievements or [])
         ]
         achievement_result = score_achievements(achievement_list)
+        
+        # Передаем 4 параметра в score_essay
         essay_result = score_essay(experience, growth, authenticity, potential)
  
         # Шаг 3: Итоговый балл
@@ -180,6 +184,7 @@ async def score_candidate(profile: CandidateFullProfile):
         }
  
     except Exception as e:
+        print(f"Ошибка в /score: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
  
  
@@ -188,28 +193,18 @@ async def score_candidate(profile: CandidateFullProfile):
 async def rank_multiple_candidates(profiles: List[CandidateFullProfile]):
     if len(profiles) < 2:
         raise HTTPException(status_code=400, detail="Нужно минимум 2 кандидата")
-    if len(profiles) > 20:
-        raise HTTPException(status_code=400, detail="Максимум 20 кандидатов")
- 
+    
     try:
         all_scores = []
- 
         for profile in profiles:
-            # Для /rank используем дефолтные баллы эссе (5/5/5)
-            # чтобы не ждать LLM для каждого кандидата
             school_result = score_school(profile.school_name, profile.gpa)
-            cert_result = score_certificate(
-                cert_type=profile.cert_type,
-                cert_score=profile.cert_score,
-                cert_valid=profile.cert_valid,
-                cert_expired=profile.cert_expired
-            )
-            achievement_list = [
-                {"title": a.title, "level": a.level, "category": a.category}
-                for a in (profile.achievements or [])
-            ]
+            cert_result = score_certificate(profile.cert_type, profile.cert_score, profile.cert_valid, profile.cert_expired)
+            
+            achievement_list = [{"title": a.title, "level": a.level, "category": a.category} for a in (profile.achievements or [])]
             achievement_result = score_achievements(achievement_list)
-            essay_result = score_essay(5, 5, 5)  # нейтральный дефолт
+            
+            # ИСПРАВЛЕНО: Передаем 4 дефолтных балла (5, 5, 5, 5)
+            essay_result = score_essay(5, 5, 5, 5) 
  
             total = compute_total_score(
                 school_result=school_result,
@@ -221,14 +216,11 @@ async def rank_multiple_candidates(profiles: List[CandidateFullProfile]):
             all_scores.append(total)
  
         ranked = rank_candidates(all_scores)
-        return {
-            "status": "ok",
-            "total_candidates": len(ranked),
-            "ranking": ranked
-        }
+        return {"status": "ok", "ranking": ranked}
  
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка ранжирования: {str(e)}")
+        print(f"Ошибка в /rank: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
  
  
 # --- 4. Только браузерный след ---
@@ -253,5 +245,5 @@ async def web_check(
  
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
- 
+    # Убедись, что путь к приложению указан верно относительно места запуска
+    uvicorn.run(app, host="0.0.0.0", port=8000)
