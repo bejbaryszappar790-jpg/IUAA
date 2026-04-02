@@ -1,5 +1,5 @@
 """
-scorer.py — Модуль взвешенного скоринга кандидатов InVision U (Исправленная версия)
+scorer.py — Модуль взвешенного скоринга кандидатов InVision U (Финальная версия)
 Логика: троечник из элитной школы > отличник из обычной школы
 Итоговый балл: 100 очков максимум
 """
@@ -56,14 +56,11 @@ def score_school(school_name: str, gpa: float) -> dict:
     # Базовый балл за GPA (0-100)
     base_gpa_score = max(0, min(100, (gpa - 1.0) / 4.0 * 100))
 
-    # ПРИМЕНЯЕМ МНОЖИТЕЛЬ (Исправлено: теперь множитель не дублируется)
     # Считаем процент от веса блока (25) с учетом коэффициента школы
     final_score = (base_gpa_score / 100) * WEIGHTS["school"] * multiplier
     
-    # Ограничиваем максимумом блока, но даем элитным школам преимущество
-    final_score = round(min(final_score, WEIGHTS["school"] * (multiplier if multiplier > 1 else 1)), 1)
-    # Чтобы итоговая сумма не улетела выше 100, жестко ограничиваем весом блока
-    final_score = min(final_score, float(WEIGHTS["school"]))
+    # Ограничиваем весом блока, чтобы не выйти за 100
+    final_score = round(min(final_score, float(WEIGHTS["school"])), 1)
 
     return {
         "score": final_score,
@@ -121,17 +118,14 @@ ACHIEVEMENT_CATEGORIES = {"academic": 1.0, "sport": 0.85, "arts": 0.8, "voluntee
 
 def score_achievements(achievements: list[dict]) -> dict:
     if not achievements:
-        return {"score": 0, "max": WEIGHTS["achievements"], "explanation": "Нет достижений"}
+        return {"score": 0, "max": WEIGHTS["achievements"], "explanation": "Достижения не указаны (0 баллов)"}
 
     total = 0
-    breakdown = []
     for ach in achievements:
         level = ach.get("level", "none").lower()
         cat = ach.get("category", "other").lower()
-        title = ach.get("title", "Без названия")
         points = round(ACHIEVEMENT_LEVELS.get(level, 0) * ACHIEVEMENT_CATEGORIES.get(cat, 0.7), 1)
         total += points
-        breakdown.append(f"  • {title} ({level}) → +{points}")
 
     final_score = round(min(total, WEIGHTS["achievements"]), 1)
     return {
@@ -141,19 +135,23 @@ def score_achievements(achievements: list[dict]) -> dict:
     }
 
 # ═══════════════════════════════════════
-# 4. СКОРИНГ ЭССЕ
+# 4. СКОРИНГ ЭССЕ (ИСПРАВЛЕНО: Добавлен explanation)
 # ═══════════════════════════════════════
 def score_essay(leadership: int, growth: int, authenticity: int) -> dict:
     raw = leadership + growth + authenticity
     final_score = round((raw / 30) * WEIGHTS["essay"], 1)
+    
+    # Теперь этот ключ существует и main.py не упадет
+    explanation_text = f"Лидерство {leadership}/10, Рост {growth}/10, Подлинность {authenticity}/10 → {final_score}/{WEIGHTS['essay']} баллов"
+    
     return {
         "score": final_score,
         "max": WEIGHTS["essay"],
-        "explanation": f"Лидерство {leadership}, Рост {growth}, Подлинность {authenticity} → {final_score}/{WEIGHTS['essay']}"
+        "explanation": explanation_text
     }
 
 # ═══════════════════════════════════════
-# 5. ИТОГОВЫЙ СКОРИНГ
+# 5. ИТОГОВЫЙ СКОРИНГ (ИСПРАВЛЕНО: Добавлен breakdown)
 # ═══════════════════════════════════════
 def compute_total_score(school_result, cert_result, achievement_result, essay_result, candidate_name="Кандидат"):
     total = round(school_result["score"] + cert_result["score"] + achievement_result["score"] + essay_result["score"], 1)
@@ -164,10 +162,18 @@ def compute_total_score(school_result, cert_result, achievement_result, essay_re
         "candidate": candidate_name,
         "total_score": total,
         "trust_level": trust,
-        "summary": f"{candidate_name}: {total}/100 | Доверие: {trust}"
+        "summary": f"{candidate_name}: {total}/100 | Доверие: {trust}",
+        # Эта часть критически важна для твоего main.py
+        "breakdown": {
+            "school": school_result["explanation"],
+            "certificate": cert_result["explanation"],
+            "achievements": achievement_result["explanation"],
+            "essay": essay_result["explanation"]
+        }
     }
 
 def rank_candidates(candidates: list[dict]) -> list[dict]:
     sorted_candidates = sorted(candidates, key=lambda x: x["total_score"], reverse=True)
-    for i, c in enumerate(sorted_candidates): c["rank"] = i + 1
+    for i, c in enumerate(sorted_candidates): 
+        c["rank"] = i + 1
     return sorted_candidates
