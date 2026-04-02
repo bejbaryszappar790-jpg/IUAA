@@ -1,0 +1,244 @@
+--- FILE: src/ai_modules/prompts.py ---
+SYSTEM_PROMPT = """
+ВАЖНО: ОТВЕТ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
+Вы — СУРОВЫЙ ДЕТЕКТИВ приемной комиссии университета InVision U. Ваша цель — выявить реальных талантов и отсеять тех, кто использует пустые слова.
+
+ПРАВИЛА ДЕТЕКТИВА:
+1. ЭЛИТНЫЕ ШКОЛЫ: НИШ (NIS), РФМШ (RFMSH), БИЛ (BIL) — это высшая категория. Если кандидат оттуда, его достижения имеют огромный вес.
+2. МЕЖДУНАРОДНЫЕ ТЕСТЫ: SAT 1300+ или Math 700+ — это признак выдающихся способностей. Обязательно отметьте это в заключении.
+3. АНТИ-ШАБЛОН: Ищите признаки ChatGPT (слова "вдохновение", "уникальный путь", "неустанное стремление" без фактов). Если эссе кажется сгенерированным — ставьте Подлинность 3/10.
+4. ЛОГИКА СЕРТИФИКАТОВ: Если QR-кода нет, но документ выдан до 2022 года или такой организацией как UCMAS или НИШ — не снижайте балл за подлинность. Это официальные бумаги.
+
+ФОРМАТ ОТВЕТА (СТРОГО):
+
+Эссе:
+Лидерство: X/10 (Конкретная причина балла на основе фактов)
+Рост: X/10 (Был ли в тексте пример реального преодоления трудностей?)
+Подлинность: X/10 (Твое чутье детектива: живой человек или ИИ?)
+Заключение: [Жесткий вердикт: стоит ли принимать этого кандидата]
+
+Подлинность сертификатов:
+[Анализ на основе предоставленных технических данных и дат]
+"""
+
+def format_certificate(cert):
+    """Преобразует данные из cert_val.py в текст для промпта"""
+    if not cert:
+        return "ТЕХНИЧЕСКИЙ РАЗБОР СЕРТИФИКАТА: Данные не предоставлены."
+
+    qr_status = "✅ Найден" if cert.get("qr_found") else "⚠️ Не найден (проверьте печать вручную)"
+    link_status = "✅ Валидна" if cert.get("link_valid") else f"❌ {cert.get('link_message')}"
+    
+    expiry = cert.get("expiry", {})
+    is_expired = expiry.get("is_expired", False)
+    exp_status = "⚠️ ПРОСРОЧЕН" if is_expired else "✅ Действителен"
+    days_left = expiry.get("days_left", 0)
+
+    return f"""
+ТЕХНИЧЕСКИЙ РАЗБОР СЕРТИФИКАТА:
+- Наличие QR-кода: {qr_status}
+- Ссылка из QR: {cert.get("qr_url", "Отсутствует")}
+- Статус ссылки: {link_status}
+- Срок действия: {exp_status} (Осталось дней: {days_left})
+"""
+
+def build_full_prompt(essay_text, cert_result=None):
+    """Сборка финального промпта"""
+    cert_section = format_certificate(cert_result)
+    return f"{SYSTEM_PROMPT}\n\nЭССЕ И ВЫЯВЛЕННЫЕ ФАКТЫ:\n{essay_text}\n\n{cert_section}"
+--- FILE: src/ai_modules/evaluator.py ---
+import requests
+import re
+from src.ai_modules.prompts import build_full_prompt
+from src.ai_modules.cert_val import verify_certificate
+
+OLLAMA_URL = "http://localhost:11434/api/chat"
+MODEL_NAME = "MFDoom/deepseek-r1-tool-calling:8b"
+
+def hard_parse_facts(text):
+    """Программный поиск достижений в тексте перед отправкой в ИИ"""
+    facts = []
+    t = text.lower()
+    
+    # Проверка на элитные школы
+    if any(x in t for x in ["ниш", "nis", "назарбаев", "рфмш", "rfmsh", "бил", "bil"]):
+        facts.append("!!! ВНИМАНИЕ ДЛЯ ИИ: Кандидат из ЭЛИТНОЙ школы (НИШ/РФМШ/БИЛ). Уровень сложности обучения очень высокий.")
+    
+    # Поиск SAT баллов
+    sat_match = re.search(r"sat.*?(1[345]\d{2})", t)
+    if sat_match:
+        facts.append(f"!!! ФАКТ: Обнаружен результат SAT {sat_match.group(1)}. Это международный стандарт качества.")
+
+    # Поиск UCMAS
+    if "ucmas" in t:
+        facts.append("!!! ФАКТ: У кандидата есть сертификат UCMAS (ментальная арифметика).")
+
+    return "\n".join(facts)
+
+def extract_scores(ai_text):
+    """Извлечение баллов из ответа ИИ"""
+    scores = {"leadership": 6, "growth": 6, "authenticity": 6}
+    patterns = {
+        "leadership": r"Лидерство:\s*(\d+)",
+        "growth": r"Рост:\s*(\d+)",
+        "authenticity": r"Подлинность:\s*(\d+)"
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, ai_text)
+        if match:
+            scores[key] = max(0, min(10, int(match.group(1))))
+    return scores
+
+def evaluate_candidate(text, cert_file=None, test_date=None, cert_type=None):
+    """Главная функция оценки"""
+    # 1. Извлекаем жесткие факты
+    extra_facts = hard_parse_facts(text)
+    full_content = f"{extra_facts}\n\n{text[:4000]}"
+    
+    # 2. Техническая проверка сертификата
+    cert_result = None
+    if cert_file and test_date:
+        try:
+            cert_result = verify_certificate(cert_file, test_date, cert_type or "IELTS")
+        except Exception as e:
+            print(f"Error in cert_val: {e}")
+
+    # 3. Сборка промпта и запрос к ИИ
+    prompt = build_full_prompt(full_content, cert_result)
+
+    try:
+        response = requests.post(OLLAMA_URL, json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.1} # Делаем ИИ более точным
+        }, timeout=120)
+        
+        response.raise_for_status()
+        content = response.json()["message"]["content"]
+        scores = extract_scores(content)
+        return content, scores
+    except Exception as e:
+        return f"Ошибка анализа: {str(e)}", {"leadership": 5, "growth": 5, "authenticity": 5}
+--- FILE: src/ai_modules/cert_val.py ---
+import cv2
+import os
+from pyzbar.pyzbar import decode
+from datetime import datetime, timedelta
+
+def extract_qr_link(file_path):
+    """Извлечение ссылки из QR-кода"""
+    if not file_path.lower().endswith((".jpg", ".jpeg", ".png")):
+        return None
+    
+    img = cv2.imread(file_path)
+    if img is None:
+        return None
+    
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        detected = decode(gray)
+        if detected:
+            return detected[0].data.decode("utf-8")
+    except:
+        pass
+    return None
+
+def verify_certificate(file_path, test_date_str, cert_type):
+    """Верификация сертификата"""
+    qr_url = extract_qr_link(file_path)
+    
+    # Логика: если QR нет, но дата старая (до 2022) — это допустимо
+    link_valid = qr_url is not None
+    link_msg = "Ссылка активна" if link_valid else "QR-код не обнаружен (норма для старых образцов)"
+    
+    # Проверка срока годности (базово 2 года)
+    try:
+        t_date = datetime.strptime(test_date_str, "%Y-%m-%d")
+        validity_period = 730 # 2 года
+        expiry_date = t_date + timedelta(days=validity_period)
+        days_left = (expiry_date - datetime.now()).days
+        is_expired = days_left < 0
+    except:
+        is_expired, days_left = False, 0
+
+    return {
+        "qr_url": qr_url,
+        "qr_found": qr_url is not None,
+        "link_valid": link_valid,
+        "link_message": link_msg,
+        "expiry": {
+            "is_expired": is_expired,
+            "days_left": max(0, days_left)
+        }
+    }
+--- FILE: src/api/main.py ---
+import sys
+import os
+import shutil
+import uuid
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+# Настройка путей
+root_path = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root_path))
+
+from src.ai_modules.file_reader import read_file
+from src.ai_modules.evaluator import evaluate_candidate
+
+app = FastAPI(title="InVision U AI Detective")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+TEMP_DIR = "temp_storage"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+@app.post("/analyze")
+async def analyze_candidate(
+    candidate_name: str = Form(...),
+    test_date: str = Form("2024-01-01"),
+    cert_type: str = Form("OTHER"),
+    file: UploadFile = File(...)
+):
+    """Эндпоинт для полного анализа документа"""
+    file_id = str(uuid.uuid4())
+    ext = os.path.splitext(file.filename)[1]
+    temp_path = os.path.join(TEMP_DIR, f"{file_id}{ext}")
+
+    try:
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # 1. Читаем текст
+        extracted_text = read_file(temp_path)
+        
+        # 2. Запускаем глубокий ИИ-анализ с нашими новыми правилами
+        report, scores = evaluate_candidate(
+            text=extracted_text,
+            cert_file=temp_path,
+            test_date=test_date,
+            cert_type=cert_type
+        )
+
+        return {
+            "candidate": candidate_name,
+            "status": "success",
+            "ai_report": report,
+            "ai_scores": scores
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)

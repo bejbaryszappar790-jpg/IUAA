@@ -1,0 +1,835 @@
+--- FILE: src/ai_modules/file_reader.py ---
+from docx import Document
+import pdfplumber
+
+def read_docx(file_path):
+    doc = Document(file_path)
+    return "\n".join([p.text for p in doc.paragraphs])
+
+def read_pdf(file_path):
+    text = ""
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+    return text
+
+def read_file(file_path):
+    ext = file_path.lower()
+    if ext.endswith(".docx"):
+        return read_docx(file_path)
+    elif ext.endswith(".pdf"):
+        return read_pdf(file_path)
+    elif ext.endswith((".jpg", ".jpeg", ".png")):
+        return "Image file detected. Skipping text extraction, proceeding to QR validation."
+    else: raise ValueError("Unsupported format")--- FILE: src/ai_modules/__init__.py ---
+--- FILE: src/ai_modules/prompts.py ---
+SYSTEM_PROMPT = """
+ВАЖНО: ВАШ ОТВЕТ ДОЛЖЕН БЫТЬ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. НЕ ИСПОЛЬЗУЙТЕ АНГЛИЙСКИЕ ИЛИ КИТАЙСКИЕ ИЕРОГЛИФЫ.
+
+Вы — эксперт приемной комиссии InVision U. Ваша цель — выявить будущих лидеров и предпринимателей Казахстана.
+
+ОСНОВНЫЕ ПРАВИЛА:
+- Не поощряйте вычурный язык. Определяйте ИИ-генерацию или шаблонные фразы.
+- Если конкретных доказательств опыта нет — ставьте НИЗКИЙ балл.
+- Будьте консервативны и скептичны. 
+
+ИНСТРУКЦИЯ ПО ОЦЕНКЕ:
+1. Лидерский потенциал (0-10): Ищите реальные действия, а не слова "Я лидер".
+2. Ориентация на рост (0-10): Ищите примеры преодоления трудностей.
+3. Подлинность (0-10): Если текст шаблонный или "слишком идеальный" — балл не выше 5.
+
+ИНСТРУКЦИЯ ПО СЕРТИФИКАТАМ:
+- Используйте данные из блока "ТЕХНИЧЕСКИЙ РАЗБОР СЕРТИФИКАТА".
+- Если QR найден и ссылка валидна — подтвердите подлинность.
+- Если сертификат просрочен — укажите это как минус к актуальности навыков.
+
+ФОРМАТ ОТВЕТА (СТРОГО):
+
+Эссе:
+Лидерство: X/10 (Краткое объяснение)
+Рост: X/10 (Краткое объяснение)
+Подлинность: X/10 (Краткое объяснение)
+Заключение: [Сильные и слабые стороны кандидата]
+
+Подлинность сертификатов:
+[Ваш технический вердикт на основе предоставленных данных]
+
+СТРОГО РУССКИЙ ЯЗЫК.
+"""
+
+def format_certificate(cert):
+    """
+    Преобразует технический словарь из cert_val.py в текст для ИИ.
+    """
+    if not cert:
+        return "ТЕХНИЧЕСКИЙ РАЗБОР СЕРТИФИКАТА: Данные не предоставлены."
+
+    qr_status = "✅ Найден" if cert.get("qr_found") else "❌ Не найден (или файл не является изображением)"
+    link_status = "✅ Валидна" if cert.get("link_valid") else f"❌ Ошибка ({cert.get('link_message')})"
+    
+    expiry = cert.get("expiry", {})
+    is_expired = expiry.get("is_expired", False)
+    exp_status = "⚠️ ПРОСРОЧЕН" if is_expired else "✅ Действителен"
+    days_left = expiry.get("days_left", 0)
+
+    return f"""
+ТЕХНИЧЕСКИЙ РАЗБОР СЕРТИФИКАТА:
+- Наличие QR-кода: {qr_status}
+- Ссылка из QR: {cert.get("qr_url", "Отсутствует")}
+- Статус проверки ссылки: {link_status}
+- Срок действия: {exp_status} (Осталось дней: {days_left})
+"""
+
+def build_full_prompt(essay_text, cert_result=None):
+    """
+    Собирает финальный промпт для отправки в LLM.
+    """
+    cert_section = format_certificate(cert_result)
+
+    # Если вместо эссе пришла заглушка об изображении
+    if "Image file detected" in essay_text:
+        context_note = "\nЗАМЕТКА: Кандидат отправил только файл сертификата. Оцените подлинность по техническим данным.\n"
+    else:
+        context_note = ""
+
+    return f"""
+{SYSTEM_PROMPT}
+
+{context_note}
+
+ЭССЕ КАНДИДАТА (ИЛИ ТЕКСТ ИЗ ФАЙЛА):
+{essay_text}
+
+{cert_section}
+"""--- FILE: src/ai_modules/cert_val.py ---
+import cv2
+import os
+import requests
+from pyzbar.pyzbar import decode
+from datetime import timedelta, datetime
+
+def extract_qr_link(file_path):
+    """
+    Безопасно извлекает QR-код. 
+    Если это не картинка (PDF/DOCX), функция просто вернет None, не вызывая ошибку.
+    """
+    # Шаг 1: Проверка расширения (защита от краша на PDF)
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in [".jpg", ".jpeg", ".png"]:
+        print(f"[cert_val] Пропуск QR-анализа: файл {ext} не является изображением.")
+        return None
+
+    # Шаг 2: Чтение изображения
+    img = cv2.imread(file_path)
+    if img is None:
+        print("[cert_val] Ошибка: Не удалось прочитать изображение.")
+        return None
+
+    # Шаг 3: Обработка и поиск QR
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        detected_objects = decode(gray)
+        if not detected_objects:
+            return None
+        return detected_objects[0].data.decode("utf-8")
+    except Exception as e:
+        print(f"[cert_val] Ошибка декодирования QR: {e}")
+        return None
+
+def verify_certificate_link(url, allowed_domains=None):
+    """
+    Проверяет, живая ли ссылка из QR-кода.
+    """
+    if not url:
+        return False, "QR-код не найден или файл не является изображением"
+    
+    try:
+        # Пытаемся зайти по ссылке
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            return False, f"Сайт вернул ошибку: {response.status_code}"
+
+        if allowed_domains:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            if domain not in allowed_domains:
+                return False, f"Домен {domain} не входит в список доверенных"
+
+        return True, "Ссылка активна и ведет на официальный ресурс"
+
+    except Exception as e:
+        return False, f"Ошибка сети: {str(e)}"
+
+def check_expiry(test_date_str, certificate_type="IELTS", date_format="%Y-%m-%d"):
+    """
+    Проверяет срок годности сертификата.
+    """
+    try:
+        test_date = datetime.strptime(test_date_str, date_format)
+        current_date = datetime.now()
+
+        validity_years = {
+            "IELTS": 2,
+            "TOEFL": 2,
+            "DUOLINGO": 2,
+            "UNT": 1
+        }
+
+        years = validity_years.get(certificate_type.upper(), 2)
+        expiry_date = test_date + timedelta(days=365 * years)
+
+        days_left = (expiry_date - current_date).days
+        is_expired = days_left < 0
+
+        return {
+            "is_expired": is_expired,
+            "expiry_date": expiry_date.strftime("%Y-%m-%d"),
+            "days_left": days_left
+        }
+    except Exception as e:
+        print(f"[cert_val] Ошибка даты: {e}")
+        return {"is_expired": False, "expiry_date": "N/A", "days_left": 0}
+
+def verify_certificate(file_path, test_date, cert_type):
+    """
+    Главная функция, которую вызывает evaluator.py
+    """
+    qr_url = extract_qr_link(file_path)
+    link_valid, link_msg = verify_certificate_link(qr_url)
+    expiry = check_expiry(test_date, cert_type)
+
+    return {
+        "qr_url": qr_url,
+        "qr_found": qr_url is not None,
+        "link_valid": link_valid,
+        "link_message": link_msg,
+        "expiry": expiry
+    }--- FILE: src/ai_modules/web_footprint.py ---
+"""
+web_footprint.py — Модуль проверки браузерного следа кандидата (Исправленная версия)
+"""
+
+import requests
+import time
+import re
+from urllib.parse import quote
+from duckduckgo_search import DDGS  # Библиотека из requirements.txt
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+# ═══════════════════════════════════════
+# 1. ПОИСК ЧЕРЕЗ DUCKDUCKGO (С РЕЗЕРВОМ)
+# ═══════════════════════════════════════
+
+def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
+    """
+    Ищет информацию. Сначала через надежную библиотеку DDGS, 
+    затем (если не вышло) через ручной парсинг HTML.
+    """
+    # МЕТОД А: Используем современную библиотеку (Решение Бага №2)
+    try:
+        with DDGS() as ddgs:
+            results = []
+            ddgs_gen = ddgs.text(query, max_results=max_results)
+            for r in ddgs_gen:
+                results.append({
+                    "title": r.get('title', ''),
+                    "snippet": r.get('body', ''),
+                    "url": r.get('href', '')
+                })
+            if results:
+                print(f"[web_footprint] Успешный поиск через DDGS для: {query[:30]}...")
+                return results
+    except Exception as e:
+        print(f"[web_footprint] Библиотека DDGS временно недоступна, переход на ручной парсинг: {e}")
+
+    # МЕТОД Б: Ручной парсинг (Твой старый код как запасной план)
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        
+        text = response.text
+        titles = re.findall(r'class="result__a"[^>]*>(.*?)</a>', text, re.DOTALL)
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</div>', text, re.DOTALL)
+        urls = re.findall(r'class="result__url"[^>]*>(.*?)</a>', text, re.DOTALL)
+
+        def clean_html(raw):
+            return re.sub(r'<[^>]+>', '', raw).strip()
+
+        fallback_results = []
+        for i in range(min(max_results, len(titles))):
+            fallback_results.append({
+                "title": clean_html(titles[i]),
+                "snippet": clean_html(snippets[i]) if i < len(snippets) else "",
+                "url": clean_html(urls[i]) if i < len(urls) else "",
+            })
+        return fallback_results
+    except Exception as e:
+        return [{"error": str(e), "title": "Ошибка поиска", "snippet": "", "url": ""}]
+
+# ═══════════════════════════════════════
+# 2. ПРОВЕРКА ОДНОГО ДОСТИЖЕНИЯ
+# ═══════════════════════════════════════
+
+def verify_achievement(candidate_name: str, achievement: str, year: str = "") -> dict:
+    query = f"{candidate_name} {achievement} {year}".strip()
+    
+    # Небольшая пауза, чтобы DuckDuckGo нас не забанил
+    time.sleep(1) 
+    results = search_duckduckgo(query, max_results=5)
+
+    name_parts = candidate_name.lower().split()
+    found_with_name = False
+    found_event = False
+    matching_urls = []
+
+    for r in results:
+        if "error" in r or not r.get("title"): continue
+        
+        combined = (r.get("title", "") + " " + r.get("snippet", "")).lower()
+        
+        # Проверяем имя (минимум 3 символа в части имени)
+        if any(part in combined for part in name_parts if len(part) > 2):
+            found_with_name = True
+            matching_urls.append(r.get("url", ""))
+
+        # Проверяем ключевые слова из достижения
+        ach_words = achievement.lower().split()
+        matches = sum(1 for w in ach_words if len(w) > 3 and w in combined)
+        if matches >= 2:
+            found_event = True
+
+    if found_with_name:
+        status, conf, msg = "confirmed", "Высокая", "✅ Найдено прямое подтверждение"
+    elif found_event:
+        status, conf, msg = "partial", "Средняя", "⚠️ Событие найдено, связь с именем неявная"
+    else:
+        status, conf, msg = "not_found", "Низкая", "❌ Не найдено в открытых источниках"
+
+    return {
+        "achievement": achievement,
+        "status": status,
+        "confidence": conf,
+        "message": msg,
+        "links": matching_urls[:2]
+    }
+
+# ═══════════════════════════════════════
+# 3. ПРОВЕРКА GITHUB
+# ═══════════════════════════════════════
+
+def check_github(github_username: str) -> dict:
+    if not github_username:
+        return {"found": False, "message": "GitHub не указан"}
+    
+    username = github_username.strip("/").split("/")[-1].replace("@", "")
+    try:
+        url = f"https://api.github.com/users/{username}"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 404:
+            return {"found": False, "message": f"Профиль {username} не найден"}
+        
+        data = res.json()
+        repos = data.get("public_repos", 0)
+        stars = 0 # Для звезд нужен доп. запрос, для MVP хватит репозиториев
+        
+        level = "Высокая" if repos > 10 else "Средняя" if repos > 3 else "Низкая"
+        
+        return {
+            "found": True,
+            "username": username,
+            "repos": repos,
+            "activity": level,
+            "url": f"https://github.com/{username}",
+            "message": f"✅ GitHub: {repos} репо, активность {level}"
+        }
+    except Exception as e:
+        return {"found": False, "message": f"Ошибка GitHub: {str(e)}"}
+
+# ═══════════════════════════════════════
+# 4. ОБЩИЙ ВЕРДИКТ
+# ═══════════════════════════════════════
+
+def check_web_footprint(candidate_name, achievements=None, github_username=None):
+    verified_ach = []
+    if achievements:
+        for ach in achievements:
+            res = verify_achievement(candidate_name, ach.get("title", ""), ach.get("year", ""))
+            verified_ach.append(res)
+
+    github_res = check_github(github_username) if github_username else None
+    
+    # Считаем общий уровень доверия
+    confirmed_count = sum(1 for a in verified_ach if a["status"] == "confirmed")
+    trust = "Высокий" if confirmed_count > 0 or (github_res and github_res["found"]) else "Низкий"
+
+    return {
+        "overall_trust": trust,
+        "github": github_res,
+        "achievements": verified_ach,
+        "summary": f"Доверие: {trust}. Подтверждено достижений: {confirmed_count}"
+    }--- FILE: src/ai_modules/evaluator.py ---
+import requests
+import re
+from src.ai_modules.prompts import build_full_prompt
+from src.ai_modules.cert_val import verify_certificate
+ 
+OLLAMA_URL = "http://localhost:11434/api/chat"
+MODEL_NAME = "MFDoom/deepseek-r1-tool-calling:8b"
+
+def truncate_text(text: str, max_chars: int = 3000) -> str:
+    return text[:max_chars]
+
+def extract_scores(ai_text: str) -> dict:
+    """
+    Извлекает баллы из текстового ответа ИИ.
+    Если ИИ не указал баллы, возвращает базовые значения 6 (чуть выше среднего).
+    """
+    scores = {"leadership": 6, "growth": 6, "authenticity": 6}
+    
+    # Ищем паттерны: "Лидерство: 8/10" или "Лидерство: 8"
+    patterns = {
+        "leadership": r"Лидерство:\s*(\d+)",
+        "growth": r"Рост:\s*(\d+)",
+        "authenticity": r"Подлинность:\s*(\d+)"
+    }
+    
+    for key, pattern in patterns.items():
+        match = re.search(pattern, ai_text, re.IGNORECASE)
+        if match:
+            val = int(match.group(1))
+            # Ограничиваем диапазон от 0 до 10
+            scores[key] = max(0, min(10, val))
+            
+    return scores
+ 
+def evaluate_candidate(
+    text: str,
+    cert_file: str = None,
+    test_date: str = None,
+    cert_type: str = None
+) -> tuple: # Возвращает (content, scores_dict)
+ 
+    # Шаг 1: Подготовка текста
+    # Если это изображение (Баг №3), мы помечаем это для промпта
+    is_image_only = "Image file detected" in text
+    clean_text = truncate_text(text)
+ 
+    # Шаг 2: Проверка сертификата техническими модулями
+    cert_result = None
+    if cert_file and test_date and cert_type:
+        try:
+            cert_result = verify_certificate(cert_file, test_date, cert_type)
+        except Exception as e:
+            print(f"[evaluator] Ошибка технической проверки: {e}")
+ 
+    # Шаг 3: Сборка промпта
+    prompt = build_full_prompt(essay_text=clean_text, cert_result=cert_result)
+ 
+    # Шаг 4: Запрос к Ollama
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"temperature": 0.2, "top_p": 0.9}
+            },
+            timeout=120
+        )
+        response.raise_for_status()
+        content = response.json()["message"]["content"]
+        
+        # Шаг 5: Извлечение баллов (Решение Бага №1)
+        scores = extract_scores(content)
+        
+        return content, scores
+ 
+    except Exception as e:
+        error_msg = f"Ошибка анализа ИИ: {str(e)}"
+        print(f"[evaluator] {error_msg}")
+        return error_msg, {"leadership": 5, "growth": 5, "authenticity": 5}--- FILE: src/ai_modules/scorer.py ---
+"""
+scorer.py — Модуль взвешенного скоринга кандидатов InVision U (Финальная версия)
+Логика: троечник из элитной школы > отличник из обычной школы
+Итоговый балл: 100 очков максимум
+"""
+
+# ═══════════════════════════════════════
+# СПИСОК ЭЛИТНЫХ ШКОЛ КАЗАХСТАНА
+# ═══════════════════════════════════════
+ELITE_SCHOOLS = {
+    "nis": 1.4,
+    "назарбаев интеллектуальная школа": 1.4,
+    "nazarbayev intellectual school": 1.4,
+    "бил": 1.3,
+    "билим инновация": 1.3,
+    "bil": 1.3,
+    "bilim innovation": 1.3,
+    "рфмш": 1.35,
+    "республиканская физико-математическая школа": 1.35,
+    "rfmsh": 1.35,
+    "mektep": 1.25,
+    "мектеп": 1.25,
+    "bolashak": 1.25,
+    "болашак": 1.25,
+    "haileybury": 1.3,
+    "мирас": 1.2,
+    "miras": 1.2,
+    "ist": 1.2,
+    "international school": 1.2,
+}
+
+# ═══════════════════════════════════════
+# ВЕСА БЛОКОВ (итого = 100)
+# ═══════════════════════════════════════
+WEIGHTS = {
+    "school":       25,   # Школа + оценки
+    "certificate":  30,   # Сертификаты
+    "achievements": 25,   # Достижения
+    "essay":        20,   # Эссе
+}
+
+# ═══════════════════════════════════════
+# 1. СКОРИНГ ШКОЛЫ
+# ═══════════════════════════════════════
+def score_school(school_name: str, gpa: float) -> dict:
+    school_lower = school_name.lower().strip()
+    multiplier = 1.0
+    school_tier = "Обычная школа"
+
+    for keyword, mult in ELITE_SCHOOLS.items():
+        if keyword in school_lower:
+            multiplier = mult
+            school_tier = f"Элитная школа (×{mult})"
+            break
+
+    # Базовый балл за GPA (0-100)
+    base_gpa_score = max(0, min(100, (gpa - 1.0) / 4.0 * 100))
+
+    # Считаем процент от веса блока (25) с учетом коэффициента школы
+    final_score = (base_gpa_score / 100) * WEIGHTS["school"] * multiplier
+    
+    # Ограничиваем весом блока, чтобы не выйти за 100
+    final_score = round(min(final_score, float(WEIGHTS["school"])), 1)
+
+    return {
+        "score": final_score,
+        "max": WEIGHTS["school"],
+        "school_tier": school_tier,
+        "multiplier": multiplier,
+        "gpa": gpa,
+        "explanation": f"Школа: {school_name} ({school_tier}), GPA: {gpa}/5.0 → {final_score}/{WEIGHTS['school']} баллов"
+    }
+
+# ═══════════════════════════════════════
+# 2. СКОРИНГ СЕРТИФИКАТОВ
+# ═══════════════════════════════════════
+CERT_SCORES = {
+    "ielts": {(7.0, 9.0): 30, (6.0, 6.9): 22, (5.0, 5.9): 14, (0.0, 4.9): 5},
+    "toefl": {(100, 120): 30, (80, 99): 22, (60, 79): 14, (0, 59): 5},
+    "duolingo": {(120, 160): 28, (100, 119): 20, (0, 99): 10},
+    "unt": {(120, 140): 30, (100, 119): 22, (80, 99): 14, (0, 79): 5},
+    "sat": {(1400, 1600): 30, (1200, 1399): 22, (1000, 1199): 14, (0, 999): 5},
+}
+
+def score_certificate(cert_type: str, cert_score: float, cert_valid: bool, cert_expired: bool) -> dict:
+    cert_lower = cert_type.lower().strip()
+    ranges = CERT_SCORES.get(cert_lower)
+
+    if not ranges:
+        return {"score": 0, "max": WEIGHTS["certificate"], "explanation": f"Неизвестный тип: {cert_type}"}
+
+    base = 0
+    for (low, high), points in ranges.items():
+        if low <= cert_score <= high:
+            base = points
+            break
+
+    penalty_note = " | ✅ Подтверждён"
+    if cert_expired:
+        base = max(0, base - 15)
+        penalty_note = " | ⚠️ Просрочен (-15)"
+    elif not cert_valid:
+        base = max(0, base - 10)
+        penalty_note = " | ⚠️ QR не подтверждён (-10)"
+
+    final_score = round(min(base, WEIGHTS["certificate"]), 1)
+    return {
+        "score": final_score,
+        "max": WEIGHTS["certificate"],
+        "explanation": f"{cert_type}: {cert_score} → {final_score}/{WEIGHTS['certificate']} баллов{penalty_note}"
+    }
+
+# ═══════════════════════════════════════
+# 3. СКОРИНГ ДОСТИЖЕНИЙ
+# ═══════════════════════════════════════
+ACHIEVEMENT_LEVELS = {"international": 25, "national": 18, "regional": 11, "school": 5, "none": 0}
+ACHIEVEMENT_CATEGORIES = {"academic": 1.0, "sport": 0.85, "arts": 0.8, "volunteer": 0.75, "other": 0.7}
+
+def score_achievements(achievements: list[dict]) -> dict:
+    if not achievements:
+        return {"score": 0, "max": WEIGHTS["achievements"], "explanation": "Достижения не указаны (0 баллов)"}
+
+    total = 0
+    for ach in achievements:
+        level = ach.get("level", "none").lower()
+        cat = ach.get("category", "other").lower()
+        points = round(ACHIEVEMENT_LEVELS.get(level, 0) * ACHIEVEMENT_CATEGORIES.get(cat, 0.7), 1)
+        total += points
+
+    final_score = round(min(total, WEIGHTS["achievements"]), 1)
+    return {
+        "score": final_score, 
+        "max": WEIGHTS["achievements"], 
+        "explanation": f"Итого за достижения: {final_score}/{WEIGHTS['achievements']}"
+    }
+
+# ═══════════════════════════════════════
+# 4. СКОРИНГ ЭССЕ (ИСПРАВЛЕНО: Добавлен explanation)
+# ═══════════════════════════════════════
+def score_essay(leadership: int, growth: int, authenticity: int) -> dict:
+    raw = leadership + growth + authenticity
+    final_score = round((raw / 30) * WEIGHTS["essay"], 1)
+    
+    # Теперь этот ключ существует и main.py не упадет
+    explanation_text = f"Лидерство {leadership}/10, Рост {growth}/10, Подлинность {authenticity}/10 → {final_score}/{WEIGHTS['essay']} баллов"
+    
+    return {
+        "score": final_score,
+        "max": WEIGHTS["essay"],
+        "explanation": explanation_text
+    }
+
+# ═══════════════════════════════════════
+# 5. ИТОГОВЫЙ СКОРИНГ (ИСПРАВЛЕНО: Добавлен breakdown)
+# ═══════════════════════════════════════
+def compute_total_score(school_result, cert_result, achievement_result, essay_result, candidate_name="Кандидат"):
+    total = round(school_result["score"] + cert_result["score"] + achievement_result["score"] + essay_result["score"], 1)
+    total = min(total, 100.0)
+    trust = "Высокий" if total >= 75 else "Средний" if total >= 50 else "Низкий"
+    
+    return {
+        "candidate": candidate_name,
+        "total_score": total,
+        "trust_level": trust,
+        "summary": f"{candidate_name}: {total}/100 | Доверие: {trust}",
+        # Эта часть критически важна для твоего main.py
+        "breakdown": {
+            "school": school_result["explanation"],
+            "certificate": cert_result["explanation"],
+            "achievements": achievement_result["explanation"],
+            "essay": essay_result["explanation"]
+        }
+    }
+
+def rank_candidates(candidates: list[dict]) -> list[dict]:
+    sorted_candidates = sorted(candidates, key=lambda x: x["total_score"], reverse=True)
+    for i, c in enumerate(sorted_candidates): 
+        c["rank"] = i + 1
+    return sorted_candidates--- FILE: src/api/__init__.py ---
+--- FILE: src/api/main.py ---
+import sys
+import os
+import shutil
+import uuid
+import json
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+
+# 1. Настройка путей
+root_path = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root_path))
+
+# 2. Импорт модулей
+from src.ai_modules.file_reader import read_file
+from src.ai_modules.evaluator import evaluate_candidate
+from src.ai_modules.scorer import (
+    score_school, score_certificate, score_achievements,
+    score_essay, compute_total_score, rank_candidates
+)
+from src.ai_modules.web_footprint import check_web_footprint
+
+app = FastAPI(title="InVision U - AI Detective API")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+TEMP_DIR = "temp_storage"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ═══════════════════════════════════════
+# МОДЕЛИ ДАННЫХ
+# ═══════════════════════════════════════
+
+class Achievement(BaseModel):
+    title: str
+    level: str
+    category: str
+    year: Optional[str] = ""
+
+class CandidateFullProfile(BaseModel):
+    candidate_name: str
+    essay_text: Optional[str] = ""
+    school_name: str
+    gpa: float
+    cert_type: str
+    cert_score: float
+    cert_valid: bool = True
+    cert_expired: bool = False
+    test_date: Optional[str] = None
+    achievements: Optional[List[Achievement]] = []
+    github_username: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    # Баллы эссе (опционально, если фронтенд хочет передать свои)
+    essay_leadership: Optional[int] = None
+    essay_growth: Optional[int] = None
+    essay_authenticity: Optional[int] = None
+
+# ═══════════════════════════════════════
+# ЭНДПОИНТЫ
+# ═══════════════════════════════════════
+
+@app.get("/")
+async def health_check():
+    return {"status": "online", "version": "MVP 1.0 Final"}
+
+@app.post("/analyze")
+async def analyze_candidate(
+    candidate_name: str = Form(...),
+    test_date: str = Form(...),
+    cert_type: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """Анализ файла (скан сертификата или эссе)"""
+    file_id = str(uuid.uuid4())
+    ext = os.path.splitext(file.filename)[1]
+    temp_file_path = os.path.join(TEMP_DIR, f"{file_id}{ext}")
+
+    try:
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        extracted_text = read_file(temp_file_path)
+        
+        # ИСПРАВЛЕНИЕ: evaluator.py теперь возвращает (report, scores)
+        analysis_report, ai_scores = evaluate_candidate(
+            text=extracted_text,
+            cert_file=temp_file_path,
+            test_date=test_date,
+            cert_type=cert_type
+        )
+
+        return {
+            "candidate": candidate_name,
+            "status": "ok",
+            "ai_report": analysis_report,
+            "ai_extracted_scores": ai_scores
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка анализа: {str(e)}")
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+@app.post("/score")
+async def score_candidate(profile: CandidateFullProfile):
+    """Полный скоринг с ИИ-анализом и веб-поиском"""
+    try:
+        # 1. Браузерный след (Web Footprint)
+        achievements_to_check = [{"title": a.title, "year": a.year} for a in (profile.achievements or [])]
+        web_result = check_web_footprint(
+            candidate_name=profile.candidate_name,
+            achievements=achievements_to_check,
+            github_username=profile.github_username
+        )
+
+        # 2. ИИ анализ эссе и извлечение баллов
+        # Передаем текст эссе. Если его нет — помечаем это.
+        essay_content = profile.essay_text if profile.essay_text and len(profile.essay_text) > 10 else "[Текст эссе не предоставлен]"
+        
+        ai_report, ai_scores = evaluate_candidate(
+            text=essay_content,
+            test_date=profile.test_date,
+            cert_type=profile.cert_type
+        )
+
+        # Решение Бага №1: используем баллы от ИИ, если они не переданы вручную
+        leadership = profile.essay_leadership or ai_scores.get("leadership", 6)
+        growth = profile.essay_growth or ai_scores.get("growth", 6)
+        authenticity = profile.essay_authenticity or ai_scores.get("authenticity", 6)
+
+        # 3. Расчет баллов по модулям
+        school_res = score_school(profile.school_name, profile.gpa)
+        cert_res = score_certificate(
+            cert_type=profile.cert_type, 
+            cert_score=profile.cert_score, 
+            cert_valid=profile.cert_valid, 
+            cert_expired=profile.cert_expired
+        )
+        
+        ach_list = [{"title": a.title, "level": a.level, "category": a.category} for a in (profile.achievements or [])]
+        ach_res = score_achievements(ach_list)
+        
+        essay_res = score_essay(leadership, growth, authenticity)
+
+        # 4. Итоговый расчет (Explainable AI)
+        final_calculation = compute_total_score(
+            school_res, cert_res, ach_res, essay_res, profile.candidate_name
+        )
+
+        return {
+            "status": "ok",
+            "candidate": profile.candidate_name,
+            "total_score": final_calculation["total_score"],
+            "trust_level": final_calculation["trust_level"],
+            "detailed_scoring": final_calculation["breakdown"],
+            "web_analysis": web_result,
+            "ai_detective_report": ai_report
+        }
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Ошибка скоринга: {str(e)}")
+
+@app.post("/rank")
+async def rank_multiple_candidates(profiles: List[CandidateFullProfile]):
+    """Сравнение списка кандидатов"""
+    try:
+        all_scores = []
+        for profile in profiles:
+            # Для рейтинга делаем упрощенный скоринг (без повторного вызова ИИ для скорости)
+            s_res = score_school(profile.school_name, profile.gpa)
+            c_res = score_certificate(profile.cert_type, profile.cert_score, profile.cert_valid, profile.cert_expired)
+            a_list = [{"title": a.title, "level": a.level, "category": a.category} for a in (profile.achievements or [])]
+            a_res = score_achievements(a_list)
+            
+            # Берем баллы эссе из профиля или дефолт
+            e_res = score_essay(profile.essay_leadership or 6, profile.essay_growth or 6, profile.essay_authenticity or 6)
+            
+            total = compute_total_score(s_res, c_res, a_res, e_res, profile.candidate_name)
+            all_scores.append(total)
+
+        ranked = rank_candidates(all_scores)
+        return {"status": "ok", "ranking": ranked}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)

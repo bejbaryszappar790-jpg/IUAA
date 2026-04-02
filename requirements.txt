@@ -11,7 +11,7 @@ pdfminer.six==20231228
 # --- Компьютерное зрение и QR (для cert_val) ---
 opencv-python==4.10.0.84
 pyzbar==0.1.9
-Pillow==10.3.0
+Pillow==12.2.0
 
 # --- Работа с сетью и API ---
 requests==2.32.3
